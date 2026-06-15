@@ -1,0 +1,9 @@
+component Hello {
+    control;
+}
+
+assembly {
+    composition {
+        component Hello hello;
+    }
+}
