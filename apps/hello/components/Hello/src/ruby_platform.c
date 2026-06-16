@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <cpio/cpio.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -9,9 +10,11 @@
 #include <sys/mman.h>
 #include <sys/epoll.h>
 #include <sys/random.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -20,6 +23,8 @@
 #define FAKE_EPOLL_BASE 1100
 #define FAKE_EPOLL_COUNT 2
 #define FAKE_EPOLL_WATCH_COUNT 8
+#define FAKE_FILE_BASE 1200
+#define FAKE_FILE_COUNT 8
 
 typedef struct fake_eventfd {
     int used;
@@ -41,10 +46,23 @@ typedef struct fake_epoll {
     fake_epoll_watch_t watches[FAKE_EPOLL_WATCH_COUNT];
 } fake_epoll_t;
 
+typedef struct fake_file {
+    int used;
+    int fd;
+    int flags;
+    const unsigned char *data;
+    size_t size;
+    size_t offset;
+} fake_file_t;
+
+extern unsigned char ruby_cpio[];
+extern unsigned int ruby_cpio_len;
+
 static unsigned long fake_time_ns;
 static uint64_t random_state = 0x6a09e667f3bcc909ULL;
 static fake_eventfd_t fake_eventfds[FAKE_EVENTFD_COUNT];
 static fake_epoll_t fake_epolls[FAKE_EPOLL_COUNT];
+static fake_file_t fake_files[FAKE_FILE_COUNT];
 
 static fake_eventfd_t *fake_eventfd_from_fd(int fd)
 {
@@ -72,9 +90,54 @@ static fake_epoll_t *fake_epoll_from_fd(int fd)
     return 0;
 }
 
-static int fake_fd_is_known(int fd)
+static fake_file_t *fake_file_from_fd(int fd)
 {
-    return fake_eventfd_from_fd(fd) != 0 || fake_epoll_from_fd(fd) != 0;
+    size_t i;
+
+    for (i = 0; i < FAKE_FILE_COUNT; i++) {
+        if (fake_files[i].used && fake_files[i].fd == fd) {
+            return &fake_files[i];
+        }
+    }
+
+    return 0;
+}
+
+static const char *normalize_path(const char *path)
+{
+    if (path == 0) {
+        return 0;
+    }
+    while (path[0] == '/') {
+        path++;
+    }
+    while (path[0] == '.' && path[1] == '/') {
+        path += 2;
+    }
+    return path;
+}
+
+static const unsigned char *find_cpio_file(const char *path, size_t *size)
+{
+    unsigned long file_size = 0;
+    const void *file = cpio_get_file(ruby_cpio, ruby_cpio_len, normalize_path(path), &file_size);
+
+    if (file == 0) {
+        return 0;
+    }
+
+    *size = (size_t)file_size;
+    return (const unsigned char *)file;
+}
+
+static void fill_file_stat(struct stat *st, size_t size)
+{
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFREG | S_IRUSR | S_IRGRP | S_IROTH;
+    st->st_nlink = 1;
+    st->st_size = (off_t)size;
+    st->st_blksize = 4096;
+    st->st_blocks = (blkcnt_t)((size + 511) / 512);
 }
 
 static void next_time(struct timespec *ts)
@@ -157,6 +220,119 @@ int isatty(int fd)
 
     errno = ENOTTY;
     return 0;
+}
+
+int open(const char *path, int flags, ...)
+{
+    const unsigned char *data;
+    size_t size = 0;
+    size_t i;
+
+    if ((flags & O_ACCMODE) != O_RDONLY) {
+        errno = EROFS;
+        return -1;
+    }
+
+    data = find_cpio_file(path, &size);
+    if (data == 0) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    for (i = 0; i < FAKE_FILE_COUNT; i++) {
+        if (!fake_files[i].used) {
+            fake_files[i].used = 1;
+            fake_files[i].fd = FAKE_FILE_BASE + (int)i;
+            fake_files[i].flags = flags;
+            fake_files[i].data = data;
+            fake_files[i].size = size;
+            fake_files[i].offset = 0;
+            return fake_files[i].fd;
+        }
+    }
+
+    errno = EMFILE;
+    return -1;
+}
+
+int openat(int dirfd, const char *path, int flags, ...)
+{
+    (void)dirfd;
+    return open(path, flags);
+}
+
+int access(const char *path, int mode)
+{
+    size_t size = 0;
+
+    if ((mode & W_OK) != 0) {
+        errno = EROFS;
+        return -1;
+    }
+
+    if (find_cpio_file(path, &size) == 0) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    return 0;
+}
+
+int stat(const char *path, struct stat *st)
+{
+    size_t size = 0;
+
+    if (st == 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (find_cpio_file(path, &size) == 0) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    fill_file_stat(st, size);
+    return 0;
+}
+
+int lstat(const char *path, struct stat *st)
+{
+    return stat(path, st);
+}
+
+int fstat(int fd, struct stat *st)
+{
+    fake_file_t *file = fake_file_from_fd(fd);
+
+    if (file != 0) {
+        if (st == 0) {
+            errno = EFAULT;
+            return -1;
+        }
+        fill_file_stat(st, file->size);
+        return 0;
+    }
+
+    return (int)syscall(SYS_fstat, fd, st);
+}
+
+int fstatat(int dirfd, const char *path, struct stat *st, int flags)
+{
+    (void)dirfd;
+    (void)flags;
+    return stat(path, st);
+}
+
+char *getcwd(char *buf, size_t size)
+{
+    if (buf == 0 || size < 2) {
+        errno = ERANGE;
+        return 0;
+    }
+
+    buf[0] = '/';
+    buf[1] = 0;
+    return buf;
 }
 
 ssize_t readlink(const char *path, char *buf, size_t bufsiz)
@@ -354,6 +530,7 @@ int epoll_pwait(int epfd, struct epoll_event *events, int maxevents, int timeout
 ssize_t read(int fd, void *buf, size_t count)
 {
     fake_eventfd_t *event = fake_eventfd_from_fd(fd);
+    fake_file_t *file = fake_file_from_fd(fd);
 
     if (event != 0) {
         uint64_t value;
@@ -378,8 +555,126 @@ ssize_t read(int fd, void *buf, size_t count)
         memcpy(buf, &value, sizeof(value));
         return (ssize_t)sizeof(value);
     }
+    if (file != 0) {
+        size_t remaining;
+
+        if (buf == 0 && count != 0) {
+            errno = EFAULT;
+            return -1;
+        }
+        if (file->offset >= file->size) {
+            return 0;
+        }
+
+        remaining = file->size - file->offset;
+        if (count > remaining) {
+            count = remaining;
+        }
+
+        memcpy(buf, file->data + file->offset, count);
+        file->offset += count;
+        return (ssize_t)count;
+    }
 
     return syscall(SYS_read, fd, buf, count);
+}
+
+ssize_t readv(int fd, const struct iovec *iov, int iovcnt)
+{
+    ssize_t total = 0;
+    int i;
+
+    if (iov == 0 || iovcnt < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (fd == STDIN_FILENO) {
+        return 0;
+    }
+
+    for (i = 0; i < iovcnt; i++) {
+        ssize_t n;
+
+        if (iov[i].iov_len == 0) {
+            continue;
+        }
+
+        n = read(fd, iov[i].iov_base, iov[i].iov_len);
+        if (n < 0) {
+            return total > 0 ? total : -1;
+        }
+        total += n;
+        if ((size_t)n != iov[i].iov_len) {
+            break;
+        }
+    }
+
+    return total;
+}
+
+ssize_t pread(int fd, void *buf, size_t count, off_t offset)
+{
+    fake_file_t *file = fake_file_from_fd(fd);
+
+    if (file != 0) {
+        size_t remaining;
+
+        if (offset < 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (buf == 0 && count != 0) {
+            errno = EFAULT;
+            return -1;
+        }
+        if ((size_t)offset >= file->size) {
+            return 0;
+        }
+
+        remaining = file->size - (size_t)offset;
+        if (count > remaining) {
+            count = remaining;
+        }
+
+        memcpy(buf, file->data + offset, count);
+        return (ssize_t)count;
+    }
+
+    return syscall(SYS_pread64, fd, buf, count, offset);
+}
+
+off_t lseek(int fd, off_t offset, int whence)
+{
+    fake_file_t *file = fake_file_from_fd(fd);
+    off_t next;
+
+    if (file == 0) {
+        return (off_t)syscall(SYS_lseek, fd, offset, whence);
+    }
+
+    switch (whence) {
+    case SEEK_SET:
+        next = offset;
+        break;
+    case SEEK_CUR:
+        next = (off_t)file->offset + offset;
+        break;
+    case SEEK_END:
+        next = (off_t)file->size + offset;
+        break;
+    default:
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (next < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    file->offset = (size_t)next;
+    return next;
 }
 
 ssize_t write(int fd, const void *buf, size_t count)
@@ -406,6 +701,7 @@ int close(int fd)
 {
     fake_eventfd_t *event = fake_eventfd_from_fd(fd);
     fake_epoll_t *epoll = fake_epoll_from_fd(fd);
+    fake_file_t *file = fake_file_from_fd(fd);
 
     if (event != 0) {
         event->used = 0;
@@ -421,6 +717,15 @@ int close(int fd)
         memset(epoll->watches, 0, sizeof(epoll->watches));
         return 0;
     }
+    if (file != 0) {
+        file->used = 0;
+        file->fd = -1;
+        file->flags = 0;
+        file->data = 0;
+        file->size = 0;
+        file->offset = 0;
+        return 0;
+    }
 
     return (int)syscall(SYS_close, fd);
 }
@@ -429,6 +734,7 @@ int fcntl(int fd, int cmd, ...)
 {
     fake_eventfd_t *event = fake_eventfd_from_fd(fd);
     fake_epoll_t *epoll = fake_epoll_from_fd(fd);
+    fake_file_t *file = fake_file_from_fd(fd);
     va_list ap;
     long arg = 0;
 
@@ -442,8 +748,8 @@ int fcntl(int fd, int cmd, ...)
         va_end(ap);
     }
 
-    if (event != 0 || epoll != 0) {
-        int *flags = event != 0 ? &event->flags : &epoll->flags;
+    if (event != 0 || epoll != 0 || file != 0) {
+        int *flags = event != 0 ? &event->flags : (epoll != 0 ? &epoll->flags : &file->flags);
 
         switch (cmd) {
         case F_GETFL:

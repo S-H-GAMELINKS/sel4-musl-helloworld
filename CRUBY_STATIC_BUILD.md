@@ -340,6 +340,7 @@ provides:
   `mremap` syscall.
 - fake `eventfd` and fake `epoll`, enough for CRuby's timer/native-thread
   wakeup path during the current single-component bring-up.
+- a read-only CPIO-backed file surface for scripts embedded into the component.
 - `readlink`, `sigaltstack`, and `mprotect` shims for process/VM behavior that
   does not exist as normal Linux functionality in the current CAmkES component.
 
@@ -457,8 +458,10 @@ Expected next tasks:
 - Decide whether to implement `munmap`/dynamic morecore properly or replace the
   allocation strategy used by CRuby/musl.
 - Increase CAmkES component heap if Ruby initialization runs out of memory.
-- Decide how Ruby scripts should be embedded, for example as C strings or as
-  generated object files linked into the component.
+- Expand the CPIO-backed file surface as Ruby script loading grows.
+- Investigate CRuby's own `load '/shell.rb'` path separately. The current
+  working path reads the CPIO file in C and passes the source to
+  `rb_eval_string_protect`.
 
 ## Current checkpoint from this workspace
 
@@ -474,7 +477,10 @@ single-thread pthread stubs link into the component
 Ruby-local allocator/mmap overrides link into the component
 Ruby-local getrandom/getentropy overrides avoid /dev/urandom fallback
 Ruby-local eventfd/epoll overrides avoid communication pipe failure
-rb_eval_string prints from Ruby under ./simulate
+Ruby script file is embedded in a CPIO archive
+hello reads /shell.rb through the CPIO-backed file surface
+rb_eval_string_protect evaluates that script under ./simulate
+shell.rb enters a Ruby shell loop instead of returning to ruby_finalize()
 ```
 
 The pthread stub changes moved the runtime failure forward. Before the stub,
@@ -521,19 +527,27 @@ pthread surface, the first GC heap allocation fault, or random source
 initialization. It is the CRuby pthread/native-thread wakeup pipe path.
 
 Adding local fake `eventfd` and fake `epoll` support moved execution past that
-path. The current successful runtime checkpoint is:
+path. Adding a generated CPIO archive for `apps/hello/components/Hello/ruby`
+then allowed the component to read and evaluate `/shell.rb`. The current
+successful runtime checkpoint is:
 
 ```text
 before ruby_init
+libsel4muslcsys: Error attempting syscall 107
+libsel4muslcsys: Error attempting syscall 108
 after ruby_init
-after rb_eval_string
-Hello from CRuby on seL4
-after ruby_finalize
+Ruby shell loaded from CPIO
+commands: help, echo, version
+hello from ruby shell
+4.0.5
+Entering Ruby shell loop
+ruby>
+stdin closed; shell idle
 ```
 
-Remaining syscall logs still appear during initialization. Treat those as the
-next cleanup/classification task rather than as blockers for the first embedded
-CRuby expression milestone.
+The remaining `107`/`108` syscall logs still appear during initialization.
+Treat those as the next cleanup/classification task rather than as blockers for
+the first CPIO-backed script milestone.
 
 ## Success criteria
 
@@ -554,8 +568,10 @@ rb_eval_string("1 + 1") returns without crashing
 The current workspace also reaches:
 
 ```text
-rb_eval_string("puts 'Hello from CRuby on seL4'")
+read /shell.rb from the embedded CPIO archive
+rb_eval_string_protect(script)
+enter the Ruby shell loop
 ```
 
-Loading Ruby files and replacing the fake platform shims with real seL4-backed
-services are later milestones.
+Using CRuby's own `load` implementation and replacing the fake platform shims
+with real seL4-backed services are later milestones.

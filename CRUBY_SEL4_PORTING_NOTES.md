@@ -21,26 +21,36 @@ Confirmed working:
   hit libsel4muslcsys' unimplemented `sys_ioctl` assertion.
 - `ruby_platform.c` provides component-local fake `eventfd` and `epoll`
   support for CRuby's native-thread wakeup path.
+- `ruby_platform.c` provides a small read-only CPIO-backed file surface for
+  `open`, `openat`, `access`, `stat`, `lstat`, `fstat`, `fstatat`, `getcwd`,
+  `read`, `pread`, `lseek`, `close`, and `fcntl`.
 - `ruby_platform.c` provides no-op/failing process-environment shims such as
   `mprotect`, `sigaltstack`, and `readlink` where the current CAmkES component
   has no real equivalent yet.
-- `./simulate` reaches `ruby_init()`, evaluates a tiny Ruby expression, prints
-  from Ruby, and finalizes Ruby.
+- `./simulate` reaches `ruby_init()`, reads `shell.rb` from a generated CPIO
+  archive, evaluates it with CRuby, enters the Ruby shell loop, and stays there.
 
 Current successful runtime checkpoint:
 
 ```text
 before ruby_init
+libsel4muslcsys: Error attempting syscall 107
+libsel4muslcsys: Error attempting syscall 108
 after ruby_init
-after rb_eval_string
-Hello from CRuby on seL4
-after ruby_finalize
+Ruby shell loaded from CPIO
+commands: help, echo, version
+hello from ruby shell
+4.0.5
+Entering Ruby shell loop
+ruby>
+stdin closed; shell idle
 ```
 
-The current result is a successful bring-up milestone, not a complete Ruby
-userspace. Remaining syscall logs still appear during initialization, so the
-next work should classify and replace the remaining broad POSIX shims with
-deliberate seL4 services or explicit feature disables.
+The current result is a successful file-backed bring-up milestone, not a
+complete Ruby userspace. The `107`/`108` syscall logs happen during CRuby
+initialization and are separate from the CPIO file path. The next work should
+classify and replace the remaining broad POSIX shims with deliberate seL4
+services or explicit feature disables.
 
 ## Build configuration
 
@@ -104,6 +114,7 @@ apps/hello/components/Hello/src/ruby_alloc.c
   communication wakeup path in the current single-component experiment
 - `readlink` returning `ENOENT`, because `/proc`-style path discovery is not
   available in this environment
+- a read-only CPIO file surface for Ruby scripts embedded into the component
 - no-op `sigaltstack`
 - no-op `mprotect`, because the current Ruby `mmap` path is backed by ordinary
   component arena memory rather than real VM mappings
@@ -228,14 +239,56 @@ can wait on fake eventfds.
 This is still not a general fd/event subsystem. It is only enough for the
 current CRuby initialization path.
 
+## CPIO Script Loading Checkpoint
+
+Ruby script files are currently embedded below:
+
+```text
+apps/hello/components/Hello/ruby/
+```
+
+The component CMake file generates a `newc` archive from that directory and
+converts it to a C array:
+
+```text
+apps/hello/components/Hello/src/ruby_archive.c
+```
+
+The generated archive is linked into the CAmkES component as `ruby_cpio`.
+`ruby_platform.c` exposes that archive through a small read-only file surface.
+The current `hello.c` reads `/shell.rb` with `open`, `fstat`, `read`, and
+`close`, then passes the loaded source to `rb_eval_string_protect`.
+
+This deliberately proves the CPIO-backed file path before depending on CRuby's
+own `load` implementation. A direct Ruby `load '/shell.rb'` reached the VM
+without a missing-file exception, but did not execute the expected top-level
+script body in this environment. That path should be investigated separately
+instead of mixing it with the CPIO bring-up.
+
+CRuby's parser used more than the default 16 KiB CAmkES control stack for this
+script path. The working component configuration uses the CAmkES control-thread
+stack key:
+
+```camkes
+hello._stack_size = 1024 * 1024;
+```
+
+Using `hello.stack_size` did not affect the generated control stack. The
+generated `hello/camkes.c` should contain:
+
+```text
+ROUND_UP_UNSAFE(1048576, PAGE_SIZE_4K)
+```
+
 ## Next concrete problem
 
 The current milestone has passed:
 
 ```text
 ruby_init()
-rb_eval_string("puts 'Hello from CRuby on seL4'")
-ruby_finalize()
+read /shell.rb from CPIO
+rb_eval_string_protect(script)
+enter the Ruby shell loop
 ```
 
 Useful next directions:
