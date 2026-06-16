@@ -138,15 +138,14 @@ repo sync
 Expose this repository's app to CAmkES using a symlink:
 
 ```sh
-cd /home/sh/oss/sel4-musl-helloworld
-ln -sfn /home/sh/oss/sel4-musl-helloworld/apps/hello \
-  /home/sh/oss/sel4-musl-helloworld/vendor/camkes-project/projects/camkes/apps/hello
+ln -sfn ../../../../../apps/hello \
+  vendor/camkes-project/projects/camkes/apps/hello
 ```
 
 Confirm that CAmkES can see the app:
 
 ```sh
-ls -l /home/sh/oss/sel4-musl-helloworld/vendor/camkes-project/projects/camkes/apps/hello
+ls -l vendor/camkes-project/projects/camkes/apps/hello
 ```
 
 ## Configure
@@ -157,7 +156,7 @@ Configure the CAmkES checkout for the `hello` app. This uses the same
 For x86_64 QEMU:
 
 ```sh
-cd /home/sh/oss/sel4-musl-helloworld/vendor/camkes-project
+cd vendor/camkes-project
 ./init-build.sh -DPLATFORM=x86_64 -DSIMULATION=1 -DCAMKES_APP=hello
 ```
 
@@ -167,14 +166,14 @@ updates `CMakeCache.txt` to use `CAMKES_APP=hello`.
 ## Build
 
 ```sh
-cd /home/sh/oss/sel4-musl-helloworld/vendor/camkes-project
+cd vendor/camkes-project
 ninja
 ```
 
 ## Run
 
 ```sh
-cd /home/sh/oss/sel4-musl-helloworld/vendor/camkes-project
+cd vendor/camkes-project
 ./simulate
 ```
 

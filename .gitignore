@@ -1,5 +1,6 @@
 /vendor/camkes-project/
 /vendor/*/build*/
+/vendor/ruby*
 /build/
 /build-*/
 /CMakeFiles/

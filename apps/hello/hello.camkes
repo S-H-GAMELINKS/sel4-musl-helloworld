@@ -6,4 +6,8 @@ assembly {
     composition {
         component Hello hello;
     }
+
+    configuration {
+        hello.heap_size = 32 * 1024 * 1024;
+    }
 }
