@@ -481,6 +481,7 @@ Ruby script file is embedded in a CPIO archive
 hello reads /shell.rb through the CPIO-backed file surface
 rb_eval_string_protect evaluates that script under ./simulate
 shell.rb enters a Ruby shell loop instead of returning to ruby_finalize()
+SerialServer-backed stdin reaches Ruby STDIN.gets
 ```
 
 The pthread stub changes moved the runtime failure forward. Before the stub,
@@ -542,12 +543,20 @@ hello from ruby shell
 4.0.5
 Entering Ruby shell loop
 ruby>
-stdin closed; shell idle
+help
+commands: help, echo, version
+ruby>
+echo typed from qemu
+typed from qemu
+ruby>
+version
+4.0.5
+ruby>
 ```
 
 The remaining `107`/`108` syscall logs still appear during initialization.
 Treat those as the next cleanup/classification task rather than as blockers for
-the first CPIO-backed script milestone.
+the first CPIO-backed interactive script milestone.
 
 ## Success criteria
 
@@ -571,6 +580,7 @@ The current workspace also reaches:
 read /shell.rb from the embedded CPIO archive
 rb_eval_string_protect(script)
 enter the Ruby shell loop
+read commands from QEMU through SerialServer-backed stdin
 ```
 
 Using CRuby's own `load` implementation and replacing the fake platform shims

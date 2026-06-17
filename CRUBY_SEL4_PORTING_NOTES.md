@@ -24,6 +24,9 @@ Confirmed working:
 - `ruby_platform.c` provides a small read-only CPIO-backed file surface for
   `open`, `openat`, `access`, `stat`, `lstat`, `fstat`, `fstatat`, `getcwd`,
   `read`, `pread`, `lseek`, `close`, and `fcntl`.
+- `hello.camkes` connects `Hello` to `SerialServer` through a `GetChar`
+  interface, and `ruby_platform.c` maps `readv(STDIN_FILENO, ...)` to that
+  SerialServer input buffer.
 - `ruby_platform.c` provides no-op/failing process-environment shims such as
   `mprotect`, `sigaltstack`, and `readlink` where the current CAmkES component
   has no real equivalent yet.
@@ -43,12 +46,21 @@ hello from ruby shell
 4.0.5
 Entering Ruby shell loop
 ruby>
-stdin closed; shell idle
+help
+commands: help, echo, version
+ruby>
+echo typed from qemu
+typed from qemu
+ruby>
+version
+4.0.5
+ruby>
 ```
 
 The current result is a successful file-backed bring-up milestone, not a
-complete Ruby userspace. The `107`/`108` syscall logs happen during CRuby
-initialization and are separate from the CPIO file path. The next work should
+complete Ruby userspace. With SerialServer connected, QEMU input reaches
+Ruby's `STDIN.gets`. The `107`/`108` syscall logs happen during CRuby
+initialization and are separate from the CPIO/stdin path. The next work should
 classify and replace the remaining broad POSIX shims with deliberate seL4
 services or explicit feature disables.
 
@@ -278,6 +290,42 @@ generated `hello/camkes.c` should contain:
 
 ```text
 ROUND_UP_UNSAFE(1048576, PAGE_SIZE_4K)
+```
+
+## Serial stdin checkpoint
+
+Interactive stdin is wired through the existing CAmkES SerialServer components.
+`Hello` declares:
+
+```camkes
+uses GetChar stdin_getchar;
+```
+
+The assembly includes `SerialServer` and `TimeServer`, then connects:
+
+```camkes
+connection seL4SerialServer stdin_input(from hello.stdin_getchar, to serial.getchar);
+```
+
+`ruby_platform.c` implements `readv(STDIN_FILENO, ...)` by blocking on
+`stdin_getchar_notification()` and reading bytes from `stdin_getchar_buf`.
+Incoming `'\r'` is translated to `'\n'`, because the Ruby shell uses
+`STDIN.gets`. The same path also echoes received input to stdout, with Enter
+displayed as `"\r\n"` and Backspace/Delete displayed as `"\b \b"`.
+
+Confirmed interactive test:
+
+```text
+ruby>
+help
+commands: help, echo, version
+ruby>
+echo typed from qemu
+typed from qemu
+ruby>
+version
+4.0.5
+ruby>
 ```
 
 ## Next concrete problem

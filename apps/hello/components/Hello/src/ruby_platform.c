@@ -1,6 +1,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <cpio/cpio.h>
+#include <camkes.h>
+#include <sel4/sel4.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -25,6 +27,7 @@
 #define FAKE_EPOLL_WATCH_COUNT 8
 #define FAKE_FILE_BASE 1200
 #define FAKE_FILE_COUNT 8
+#define STDIN_GETCHAR_BUFFER_SIZE (0x1000 - 8)
 
 typedef struct fake_eventfd {
     int used;
@@ -55,8 +58,15 @@ typedef struct fake_file {
     size_t offset;
 } fake_file_t;
 
+struct stdin_getchar_buffer {
+    uint32_t head;
+    uint32_t tail;
+    char buf[STDIN_GETCHAR_BUFFER_SIZE];
+};
+
 extern unsigned char ruby_cpio[];
 extern unsigned int ruby_cpio_len;
+extern volatile struct stdin_getchar_buffer *stdin_getchar_buf;
 
 static unsigned long fake_time_ns;
 static uint64_t random_state = 0x6a09e667f3bcc909ULL;
@@ -579,6 +589,19 @@ ssize_t read(int fd, void *buf, size_t count)
     return syscall(SYS_read, fd, buf, count);
 }
 
+static void echo_stdin_char(char ch)
+{
+    if (ch == '\r' || ch == '\n') {
+        const char newline[] = "\r\n";
+        (void)write(STDOUT_FILENO, newline, sizeof(newline) - 1);
+    } else if (ch == '\b' || ch == 0x7f) {
+        const char backspace[] = "\b \b";
+        (void)write(STDOUT_FILENO, backspace, sizeof(backspace) - 1);
+    } else {
+        (void)write(STDOUT_FILENO, &ch, 1);
+    }
+}
+
 ssize_t readv(int fd, const struct iovec *iov, int iovcnt)
 {
     ssize_t total = 0;
@@ -590,7 +613,38 @@ ssize_t readv(int fd, const struct iovec *iov, int iovcnt)
     }
 
     if (fd == STDIN_FILENO) {
-        return 0;
+        for (i = 0; i < iovcnt; i++) {
+            char *base = (char *)iov[i].iov_base;
+            size_t j;
+
+            if (base == 0 && iov[i].iov_len != 0) {
+                errno = EFAULT;
+                return -1;
+            }
+
+            for (j = 0; j < iov[i].iov_len; j++) {
+                char ch;
+
+                while (stdin_getchar_buf->head == stdin_getchar_buf->tail) {
+                    seL4_Word badge;
+                    seL4_Wait(stdin_getchar_notification(), &badge);
+                }
+
+                ch = stdin_getchar_buf->buf[stdin_getchar_buf->head];
+                stdin_getchar_buf->head = (stdin_getchar_buf->head + 1) % sizeof(stdin_getchar_buf->buf);
+                echo_stdin_char(ch);
+                if (ch == '\r') {
+                    ch = '\n';
+                }
+                base[j] = ch;
+                total++;
+                if (ch == '\n') {
+                    return total;
+                }
+            }
+        }
+
+        return total;
     }
 
     for (i = 0; i < iovcnt; i++) {
