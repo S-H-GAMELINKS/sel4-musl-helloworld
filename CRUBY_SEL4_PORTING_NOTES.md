@@ -354,13 +354,34 @@ Useful next directions:
 
 ## Current milestone definition
 
-The next good milestone is:
+The current milestone is:
 
 ```text
 ./simulate
 before ruby_init
+libsel4muslcsys: Error attempting syscall 107
+libsel4muslcsys: Error attempting syscall 108
 after ruby_init
+Ruby shell loaded from CPIO
+Entering Ruby shell loop
+ruby>
+help
+commands: help, echo, version
+ruby>
+version
+4.0.5
+ruby>
 ```
 
-Only after `ruby_init()` returns should `rb_eval_string()` and Ruby stdout be
-treated as the next layer of work.
+That means the current path has already passed the original `ruby_init()` smoke
+test, the first `rb_eval_string()` test, the CPIO script loading test, and the
+SerialServer-backed stdin test.
+
+The next good milestone should be one of:
+
+- classify and replace the remaining syscall `107`/`108` paths;
+- replace deterministic randomness with a real entropy source;
+- move fake `eventfd`/`epoll` toward seL4 notifications if real Ruby thread
+  wakeups are needed;
+- investigate CRuby's own `load '/shell.rb'` behavior separately from the
+  already-working C-level CPIO read plus `rb_eval_string_protect` path.

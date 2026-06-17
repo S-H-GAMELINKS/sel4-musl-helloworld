@@ -1,13 +1,14 @@
 # CRuby static build experiment for seL4 + CAmkES + musl libc
 
-This document describes an experimental path for embedding CRuby into a CAmkES
-component. The first goal is not to run a full Ruby userland. The first goal is
-to produce CRuby headers and a static Ruby library that can be linked into the
-existing `apps/hello` component.
+This document describes the path used to embed CRuby into a CAmkES component.
+The first milestone was to produce CRuby headers and a static Ruby library that
+could be linked into `apps/hello`. The current workspace has moved beyond that:
+it embeds `shell.rb` in a CPIO archive and runs a small interactive Ruby shell
+through QEMU serial input.
 
 ## Goal
 
-Target milestone:
+Initial target milestone:
 
 ```text
 CAmkES component run()
@@ -17,7 +18,7 @@ CAmkES component run()
   -> a tiny Ruby expression can be evaluated
 ```
 
-The current `hello.c` entry point is the right shape for this experiment:
+This was the right shape for the first VM smoke test:
 
 ```c
 #include <ruby.h>
@@ -31,8 +32,20 @@ int run(void)
 }
 ```
 
-Avoid file loading, RubyGems, dynamic extensions, threads, and standard library
-use in the first milestone.
+Avoiding file loading, RubyGems, dynamic extensions, threads, and standard
+library use was useful for the first milestone. The current app now deliberately
+adds a narrow file surface, CPIO-backed `/shell.rb`, SerialServer-backed stdin,
+and local platform shims.
+
+Current milestone:
+
+```text
+CAmkES component run()
+  -> ruby_init() returns
+  -> /shell.rb is read from the embedded CPIO archive
+  -> rb_eval_string_protect(script) enters a Ruby shell loop
+  -> QEMU serial input reaches Ruby STDIN.gets
+```
 
 ## Expected difficulty
 
@@ -322,6 +335,12 @@ DeclareCAmkESComponent(
 The exact include paths depend on the CRuby build output. CRuby usually needs
 both generated build headers and source tree headers.
 
+The current component also generates `src/ruby_archive.c` from
+`apps/hello/components/Hello/ruby/`, links that generated source into the
+component, and makes the generated archive visible as `ruby_cpio`. The CAmkES
+assembly also includes `SerialServer` and `TimeServer` so that the Ruby shell
+can read from QEMU serial input.
+
 `ruby_platform.c` is the place for seL4/CAmkES-specific libc compatibility
 functions such as time and small platform shims. In the current experiment it
 provides:
@@ -420,7 +439,7 @@ ninja -v
 Use `ninja -v` so that missing include paths, missing libraries, and unresolved
 symbols are visible in the full compile/link commands.
 
-## 7. First runtime test
+## 7. Runtime tests
 
 Start with a tiny embedded Ruby expression:
 
@@ -445,6 +464,30 @@ rb_eval_string("puts 'Hello from CRuby on seL4'");
 If `puts` fails, keep the VM experiment separate from Ruby IO support. Ruby IO
 may require more OS support than expression evaluation.
 
+The current workspace has advanced to a file-backed interactive test:
+
+```text
+before ruby_init
+libsel4muslcsys: Error attempting syscall 107
+libsel4muslcsys: Error attempting syscall 108
+after ruby_init
+Ruby shell loaded from CPIO
+commands: help, echo, version
+hello from ruby shell
+4.0.5
+Entering Ruby shell loop
+ruby>
+help
+commands: help, echo, version
+ruby>
+version
+4.0.5
+ruby>
+```
+
+Those remaining `107`/`108` logs are not part of the CPIO or stdin path. Treat
+them as the next syscall-classification task.
+
 ## 8. Likely follow-up work
 
 Expected next tasks:
@@ -455,9 +498,13 @@ Expected next tasks:
 - Provide minimal time, environment, and IO behavior if CRuby requires it.
 - Keep CRuby's pthread model enabled, but provide single-thread pthread stubs
   until real seL4 threading is intentionally introduced.
-- Decide whether to implement `munmap`/dynamic morecore properly or replace the
-  allocation strategy used by CRuby/musl.
-- Increase CAmkES component heap if Ruby initialization runs out of memory.
+- Decide whether to implement `munmap`/dynamic morecore properly or keep
+  evolving the component-local allocator.
+- Classify the remaining syscall `107`/`108` logs seen during `ruby_init()`.
+- Replace deterministic `getrandom`/`getentropy` with a real entropy source
+  before any security-sensitive Ruby code runs.
+- Replace fake `eventfd`/`epoll` with a seL4 notification-backed design if real
+  Ruby native-thread wakeups are needed.
 - Expand the CPIO-backed file surface as Ruby script loading grows.
 - Investigate CRuby's own `load '/shell.rb'` path separately. The current
   working path reads the CPIO file in C and passes the source to
@@ -523,9 +570,9 @@ libsel4muslcsys: Error attempting syscall 22
 
 On this target, syscall 290 is `eventfd2`, syscall 293 is `pipe2`, and syscall
 22 is `pipe`. CRuby's `thread_pthread.c` uses these for its native-thread
-communication pipe setup. So the next concrete issue is no longer the initial
-pthread surface, the first GC heap allocation fault, or random source
-initialization. It is the CRuby pthread/native-thread wakeup pipe path.
+communication pipe setup. At that point, the concrete blocker had moved from
+the initial pthread surface, GC heap allocation, and random source initialization
+to the CRuby pthread/native-thread wakeup pipe path.
 
 Adding local fake `eventfd` and fake `epoll` support moved execution past that
 path. Adding a generated CPIO archive for `apps/hello/components/Hello/ruby`
